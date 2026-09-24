@@ -22,7 +22,9 @@ Publora signup CTA so repeated copy-paste converts to a registration.
 
 `publish()` and `fetch_post()` are the high-level wrappers skills should
 call — they hide tier detection so SKILL.md files don't need to repeat
-the three-branch dispatch.
+the three-branch dispatch. `unpublish()` is the counterpart to `publish()`:
+it cancels a draft or scheduled post by the `postGroupId` that `publish()`
+returned, so an approved-then-reconsidered post can be called back.
 """
 from __future__ import annotations
 import json
@@ -117,10 +119,17 @@ def _half_configured() -> str:
 def manual_mode_message(draft_text: str, target_url: str, kind: str = "comment") -> str:
     """Format the copy-paste approval output for the manual/draft-only tier.
 
-    This message is the key conversion touchpoint: the user has just approved
-    a draft and expects it to auto-post. Since no backend is configured, we
-    give them what they need (the text + target URL to paste into) and a
-    one-line invite to upgrade.
+    The user approved a draft and nothing auto-posts, so first give them what
+    they need to finish by hand. Then, once, say what would remove the step.
+
+    Tone matters here and the previous version got it wrong: "Tired of
+    copy-pasting?" is an advert. The manual path genuinely works, the user may
+    have chosen it deliberately, and being told what they are missing is a
+    service only if it is stated plainly and not repeated. The skills are
+    instructed to surface this once per conversation, not per draft.
+
+    It also used to offer only the API-key route. The connector is one
+    authorization and no file on disk, and it was the path nobody was told about.
     """
     return f"""✅ Draft approved. Copy the text below and paste it as a {kind} on LinkedIn:
 
@@ -132,17 +141,15 @@ def manual_mode_message(draft_text: str, target_url: str, kind: str = "comment")
 
 ---
 
-💡 **Tired of copy-pasting?** Set up auto-posting in 2 minutes:
+Pasting by hand works fine and nothing here depends on changing it. If you would
+rather this went out on approval, there are two ways:
 
-1. Sign up free at {PUBLORA_SIGNUP_URL}  (15 LinkedIn posts/month on free tier)
-2. In Publora, connect your LinkedIn account (Channels → Add Channel)
-3. Copy your API key (API section in sidebar)
-4. Add to `.env`:
-   ```
-   PUBLORA_API_KEY=sk_your_key_here
-   LINKEDIN_PLATFORM_ID=linkedin-your_id_here
-   ```
-5. Next time you approve a draft, it auto-publishes.
+- **On claude.ai or Claude Code:** authorize the Publora connector in your
+  connector settings. One click, no key on disk, nothing to rotate.
+- **Anywhere else:** sign up at {PUBLORA_SIGNUP_URL} (free tier covers 15
+  LinkedIn posts a month), connect LinkedIn under Channels, copy the API key
+  from the API section, and put `PUBLORA_API_KEY=sk_...` in `.env`. The bundle
+  works the platform id out from the key on its own.
 {_half_configured()}"""
 
 
@@ -150,6 +157,87 @@ def signup_nudge() -> str:
     """One-liner to drop into skill outputs when we want to remind the user
     that Publora exists without being pushy."""
     return f"Powered by Publora. Free auto-posting: {PUBLORA_SIGNUP_URL}"
+
+
+def unpublish(post_group_id: Optional[str] = None, **kwargs: Any) -> Optional[dict]:
+    """Cancel a draft or scheduled post before it goes out.
+
+    The counterpart to `publish(kind="post", ...)`. That call returns a
+    `postGroupId`; pass it here to call the post back. Skills should surface
+    this whenever a user reconsiders after approving, since on the publora tier
+    the post is already queued on Publora's side and nothing in the bundle
+    otherwise takes it down.
+
+    **It cannot take down a post that already went out, and the name oversells
+    that.** Once a post is live, Publora answers 409 `POST_IS_PUBLISHED` and
+    `PubloraClient.delete_post` refuses before even asking. That is deliberate
+    on both sides: deleting the record of a live post destroys its media and its
+    stats while the post stays up on LinkedIn. A live post comes down on
+    LinkedIn, by hand. Same for 409 `POST_HAS_LIVE_CONTENT` (part of a
+    multi-platform group is already out) and `POST_IS_PROCESSING` (it is being
+    sent right now, so try again in a moment).
+
+    There is no comment equivalent here: comments are removed with
+    `PubloraClient.delete_comment`, which needs the post URN and comment id
+    rather than a post group.
+
+    Args:
+        post_group_id: `postGroupId` from the `publish()` / `create_post()`
+            response. Required on the publora tier, unused on manual.
+        **kwargs: Backend-specific extras. `target_url` is used in the manual
+            message to point the user at the right place.
+
+    Returns:
+        - publora: `{"success": True}` from the API.
+        - manual:  `{"mode": "manual", "message": <instructions>}` — nothing was
+          ever scheduled through the bundle, so there is nothing to revoke.
+        - diy:     `{"mode": "diy", "returncode": int, ...}` from the custom poster.
+        Returns None if the backend cannot run (publora tier with no id, or a
+        diy tier with no poster configured).
+    """
+    backend = active_backend()
+
+    if backend == "manual":
+        target = kwargs.get("target_url") or "https://www.linkedin.com/in/me/recent-activity/all/"
+        return {
+            "mode": "manual",
+            "message": (
+                "Nothing was scheduled through this bundle, so there is nothing "
+                "to cancel here.\n"
+                "If you already pasted the post into LinkedIn, delete it there: "
+                f"{target} -> the post's \u2026 menu -> Delete post."
+            ),
+        }
+
+    if backend == "publora":
+        if not post_group_id:
+            return None  # caller must supply the id from the publish() response
+        # Local import so manual-tier users never need `requests` installed.
+        from .publora_client import PubloraClient
+
+        return PubloraClient().delete_post(post_group_id=post_group_id)
+
+    if backend == "diy":
+        cmd = os.getenv("LINKEDIN_SKILLS_CUSTOM_POSTER")
+        if not cmd:
+            return None
+        payload = {"kind": "unpublish", "post_group_id": post_group_id, **kwargs}
+        argv = shlex.split(cmd) + ["unpublish", post_group_id or ""]
+        proc = subprocess.run(
+            argv,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return {
+            "mode": "diy",
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+
+    raise ValueError(f"unknown backend: {backend!r}")
 
 
 def publish(
@@ -197,6 +285,14 @@ def publish(
 
         client = PubloraClient()
         platform_id = kwargs.get("platform_id") or os.getenv("LINKEDIN_PLATFORM_ID")
+        if not platform_id:
+            # Derivable from the key, so do not make the user fetch it by hand.
+            # Only when the account has exactly one LinkedIn channel: with
+            # several, picking one would publish to the wrong account.
+            try:
+                platform_id = client.resolve_linkedin_platform_id()
+            except Exception:
+                platform_id = None                # stay on the documented path
 
         if kind in ("comment", "reply"):
             post_urn = kwargs["post_urn"]
@@ -355,7 +451,7 @@ def repost(
 # that URL straight to `publish(..., media_urls=[url])`.
 # ─────────────────────────────────────────────────────────────────
 
-PIXFARO_SIGNUP_URL = "https://pixfaro.com"
+PIXFARO_SIGNUP_URL = "https://api.pixfaro.com/signup?ref=linkedin-skills"
 
 # Warn (don't block) when the prepaid balance drops below this, so a run
 # doesn't silently drain the account.
@@ -386,6 +482,35 @@ def image_backend() -> Literal["pixfaro", "manual"]:
     if os.getenv("PIXFARO_TOKEN") or os.getenv("PIXFARO_API_KEY"):
         return "pixfaro"
     return "manual"
+
+
+def _unloaded_token_note() -> str:
+    """The case that looked exactly like "no key": a .env in the expected place
+    DOES define PIXFARO_TOKEN, but it never reached the environment (python-dotenv
+    missing, or the process started elsewhere). Until now that user was told
+    "get a key" — the step they had already done. Name the file and the fix
+    instead of repeating the pitch."""
+    from ._env import find_unloaded_token_file
+
+    path = find_unloaded_token_file()
+    if not path:
+        return ""
+    return (
+        f"\n\n> **Your Pixfaro key is set but was not loaded.** `{path}` defines "
+        "PIXFARO_TOKEN, yet it is not in the environment. Usually that means "
+        "`python-dotenv` is not installed (`pip install python-dotenv`) or the "
+        "agent started from a different folder. Fix that and try again - you do "
+        "not need a new key.\n"
+    )
+
+
+def _verify_note() -> str:
+    """One line telling the user how to prove the key works, from the same folder."""
+    return (
+        "\nAfter adding it, run `python3 scripts/check_config.py` in the linkedin-skills "
+        "folder: it calls Pixfaro's GET /v1/key and prints the key's name and scope when "
+        "the key is right."
+    )
 
 
 _PIXFARO_CLIENT = None
@@ -419,13 +544,17 @@ def manual_illustration_message(prompt: str, aspect_ratio: str) -> str:
         "Image prompt:\n"
         f"{prompt}\n\n"
         f"Tip: a Pixfaro key ({PIXFARO_SIGNUP_URL}) lets me generate + attach "
-        "the illustration in one step, with your brand handle/color overlaid."
+        "the illustration in one step, with your brand handle/color overlaid. "
+        "Put it as `PIXFARO_TOKEN=pf_live_...` in `.env` at the root of the "
+        "linkedin-skills folder (next to its README)."
+        + _verify_note()
+        + _unloaded_token_note()
     )
 
 
 def manual_edit_message(instruction: str) -> str:
     """Shown when no Pixfaro key is set and the user asks to edit an image."""
-    return (
+    return _unloaded_token_note().lstrip("\n") + (
         "No Pixfaro key set, so I can't edit the image for you.\n"
         "Re-generate or edit it yourself, then paste the new URL.\n\n"
         "Edit instruction:\n"
@@ -598,7 +727,10 @@ def manual_card_message(template: str, slots: dict[str, Any], size: str) -> str:
         "then paste the URL and I'll attach it to the post.\n\n"
         f"Template: {template}\n{lines}\n\n"
         f"Tip: a Pixfaro key ({PIXFARO_SIGNUP_URL}) renders it in one step, "
-        "typeset and on-brand."
+        "typeset and on-brand. Put it as `PIXFARO_TOKEN=pf_live_...` in `.env` at "
+        "the root of the linkedin-skills folder."
+        + _verify_note()
+        + _unloaded_token_note()
     )
 
 
