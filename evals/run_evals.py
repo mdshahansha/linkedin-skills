@@ -115,7 +115,7 @@ def case_hook_formula():
     """hook-extractor claims it returns which of the 20 canonical formulas a
     post used. The answer must be one that exists."""
     defined = set(re.findall(r"^## (F\d+) ",
-                             (ROOT / "references" / "hook-formulas.md").read_text(), re.M))
+                             (ROOT / "references" / "hook-formulas.md").read_text(encoding="utf-8"), re.M))
     post = ("I deleted our $40k/yr analytics stack on a Tuesday.\n\n"
             "Three weeks later nobody on the team had noticed.\n\n"
             "Here is what we replaced it with, and the one thing that actually broke.")
@@ -160,6 +160,41 @@ def case_humanizer_keeps_facts():
     return prompt, grade
 
 
+def case_humanizer_audit_flags_blockers():
+    """Audit mode should detect known blockers instead of silently treating
+    a problematic draft as ready to publish."""
+    draft = (
+        "AI is transforming everything — and we need to act now — because this "
+        "is a robust, comprehensive, groundbreaking framework for the future — "
+        "truly a game changer.\n\n"
+        "Here's the thing: we cut deploy time from 47 minutes to 6. "
+        "Read the full story at https://example.com/report"
+    )
+    prompt = (
+        "Use the linkedin-humanizer skill with --mode audit on this draft. "
+        "Return the audit report only. Do not rewrite the full post.\n\n" + draft
+    )
+
+    def grade(output: str):
+        lower = output.lower()
+
+        if "fail" not in lower:
+            return False, "audit did not produce a failing result"
+
+        if "blocker" not in lower:
+            return False, "audit did not report blockers"
+
+        if "em dash" not in lower:
+            return False, "audit did not identify the em dash issue"
+
+        if "external" not in lower or "link" not in lower:
+            return False, "audit did not identify the external-link issue"
+
+        return True, "audit reported the expected blockers"
+
+    return prompt, grade
+
+
 def case_engagers_no_fabrication():
     """Segmenting must work from the people supplied, and only those.
 
@@ -198,6 +233,7 @@ CASES = {
     "reply-no-invention": ("linkedin-reply-handler: invents no participants", case_reply_no_invention),
     "hook-formula": ("linkedin-hook-extractor: names a formula that exists", case_hook_formula),
     "humanizer-facts": ("linkedin-humanizer: scrubs markers, keeps figures", case_humanizer_keeps_facts),
+    "humanizer-audit": ("linkedin-humanizer: audit flags known blockers", case_humanizer_audit_flags_blockers),
     "engagers-real": ("linkedin-engager-analytics: fabricates nobody", case_engagers_no_fabrication),
 }
 
@@ -208,7 +244,9 @@ def ask(prompt: str, timeout: int) -> tuple[str, str]:
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--output-format", "text"],
-            cwd=ROOT, capture_output=True, text=True, timeout=timeout,
+            # The CLI writes UTF-8 whatever the locale. Read as cp1252 (Windows),
+            # the answer comes back garbled, or fails on a byte cp1252 lacks.
+            cwd=ROOT, capture_output=True, encoding="utf-8", timeout=timeout,
         )
     except FileNotFoundError:
         return "", "the `claude` CLI is not on PATH"
@@ -256,7 +294,7 @@ def main() -> int:
         print(f"  [{mark}] {title:<52} {detail} ({time.time() - started:.0f}s)")
 
     if args.save:
-        args.save.write_text(json.dumps(transcripts, indent=1, ensure_ascii=False))
+        args.save.write_text(json.dumps(transcripts, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"\n{GREY}answers written to {args.save}{OFF}")
     print(f"\n{BOLD}{'All cases passed' if not failures else f'{failures} case(s) failed'}{OFF}")
     return failures
