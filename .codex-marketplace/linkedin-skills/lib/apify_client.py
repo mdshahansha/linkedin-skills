@@ -116,7 +116,9 @@ class ApifyClient:
             Dict with keys: text, authorName, authorProfileUrl, urn, shareUrn,
             canShare, url, numLikes, numComments, numShares, postedAtISO, plus
             extra metadata. `shareUrn` is the reshare parent URN
-            (`urn:li:share:*` / `urn:li:ugcPost:*`).
+            (`urn:li:share:*` / `urn:li:ugcPost:*`). `postedAtISO` carries the
+            actor's object (`{timestamp, date}`) rather than an ISO string, which
+            the name suggests and no caller currently relies on.
         """
         items = self._run_sync(
             self.POST_ACTOR, {"post_urls": [post_url]}, force_refresh=force_refresh
@@ -285,6 +287,8 @@ class ApifyClient:
             raise ValueError(
                 f"types must be a non-empty subset of {self.ENGAGER_TYPES}, got {types!r}"
             )
+        if max_items <= 0:
+            raise ValueError("max_items must be greater than 0")
 
         per_type = max(1, min(max_items // len(wanted), 3000))
         engagers: list[dict[str, Any]] = []
@@ -338,10 +342,16 @@ class ApifyClient:
             cached = self._cache_get(key)
             if cached is not None:
                 return cached
+
         data = self._do_request(actor_id, payload)
-        result = data if isinstance(data, list) else []
-        self._cache_put(key, result)
-        return result
+        if not isinstance(data, list):
+            raise ApifyError(
+                f"Unexpected response from Apify actor {actor_id}: "
+                f"expected a list, got {type(data).__name__}"
+            )
+
+        self._cache_put(key, data)
+        return data
 
     @_retry()
     def _do_request(
