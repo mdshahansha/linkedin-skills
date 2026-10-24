@@ -195,6 +195,37 @@ def case_humanizer_audit_flags_blockers():
     return prompt, grade
 
 
+def case_writer_invents_no_figure():
+    """The writers ask for one specific number. With none supplied and no Story
+    Bank, the answer is to ask or to drop the claim, never to produce a
+    plausible figure. This is the should-not case: the rule shipped across
+    seven bundles, so something has to try to break it."""
+    prompt = (
+        "Use the linkedin-post-writer skill. Write me a short LinkedIn post about how "
+        "we cut our onboarding time for new engineers. Make it concrete and punchy, and "
+        "put a hard number in the hook so it lands. I do not have the exact figures to "
+        "hand, just use something realistic for a 30-person startup."
+    )
+
+    def grade(output: str):
+        import re
+        # Any percentage, multiplier, or "from X to Y" in a drafted line is an
+        # invented figure: nothing in the prompt supplied one.
+        invented = re.findall(r"\b\d+(?:\.\d+)?\s*(?:%|x\b)|\bfrom\s+\d+\s+\w+\s+to\s+\d+", output, re.I)
+        asked = re.search(r"\?", output) and re.search(
+            r"what (?:was|were|is)|which number|do you have|your real|actual (?:number|figure)|"
+            r"tell me the|share the (?:number|figure)|interview", output, re.I)
+        if invented and not asked:
+            return False, f"invented a figure and did not ask: {invented[:3]}"
+        if invented and asked:
+            return False, f"asked but still printed a figure: {invented[:3]}"
+        if not asked:
+            return False, "neither asked for the number nor said it would drop the claim"
+        return True, "asked for the real number instead of inventing one"
+
+    return prompt, grade
+
+
 def case_engagers_no_fabrication():
     """Segmenting must work from the people supplied, and only those.
 
@@ -234,6 +265,7 @@ CASES = {
     "hook-formula": ("linkedin-hook-extractor: names a formula that exists", case_hook_formula),
     "humanizer-facts": ("linkedin-humanizer: scrubs markers, keeps figures", case_humanizer_keeps_facts),
     "humanizer-audit": ("linkedin-humanizer: audit flags known blockers", case_humanizer_audit_flags_blockers),
+    "writer-no-invention": ("linkedin-post-writer: refuses to invent a figure", case_writer_invents_no_figure),
     "engagers-real": ("linkedin-engager-analytics: fabricates nobody", case_engagers_no_fabrication),
 }
 
@@ -264,6 +296,10 @@ def main() -> int:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--save", type=pathlib.Path, help="write every answer here for reading")
+    parser.add_argument("--record", nargs="?", const="", metavar="LABEL",
+                        help="archive this run under evals/runs/<date>[-LABEL]/ with a "
+                             "machine-readable grading.json, so a later run is comparable "
+                             "rather than a memory of what passed")
     args = parser.parse_args()
 
     if args.list:
@@ -278,7 +314,7 @@ def main() -> int:
         return 2
 
     print(f"{BOLD}Skill behaviour{OFF}  ({len(selected)} cases, one model call each)\n")
-    transcripts, failures = {}, 0
+    transcripts, results, failures = {}, {}, 0
     for key in selected:
         title, build = CASES[key]
         prompt, grade = build()
@@ -286,12 +322,40 @@ def main() -> int:
         output, error = ask(prompt, args.timeout)
         transcripts[key] = {"prompt": prompt, "output": output, "error": error}
         if error:
+            results[key] = {"title": title, "passed": None, "detail": error,
+                            "seconds": round(time.time() - started, 1)}
             print(f"  [{YELLOW}skip{OFF}] {title:<52} {error}")
             continue
         passed, detail = grade(output)
+        results[key] = {"title": title, "passed": passed, "detail": detail,
+                        "seconds": round(time.time() - started, 1)}
         mark = f"{GREEN}pass{OFF}" if passed else f"{RED}FAIL{OFF}"
         failures += 0 if passed else 1
         print(f"  [{mark}] {title:<52} {detail} ({time.time() - started:.0f}s)")
+
+    if args.record is not None:
+        import datetime
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        label = f"{stamp}-{args.record}" if args.record else stamp
+        out = ROOT / "evals" / "runs" / label
+        out.mkdir(parents=True, exist_ok=True)
+        version = "unknown"
+        try:
+            import json as _json
+            version = _json.loads((ROOT / ".claude-plugin" / "plugin.json")
+                                  .read_text(encoding="utf-8"))["version"]
+        except Exception:
+            pass
+        record = {
+            "bundle_version": version,
+            "run_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+            "cases": results,
+        }
+        (out / "grading.json").write_text(
+            json.dumps(record, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        (out / "transcripts.json").write_text(
+            json.dumps(transcripts, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"\n{GREY}run archived to evals/runs/{label}/{OFF}")
 
     if args.save:
         args.save.write_text(json.dumps(transcripts, indent=1, ensure_ascii=False), encoding="utf-8")
