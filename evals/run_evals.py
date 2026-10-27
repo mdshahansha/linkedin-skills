@@ -360,8 +360,17 @@ def main() -> int:
     if args.save:
         args.save.write_text(json.dumps(transcripts, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"\n{GREY}answers written to {args.save}{OFF}")
-    print(f"\n{BOLD}{'All cases passed' if not failures else f'{failures} case(s) failed'}{OFF}")
-    return failures
+    skipped = sum(result["passed"] is None for result in results.values())
+    if failures or skipped:
+        summary = []
+        if failures:
+            summary.append(f"{failures} case(s) failed")
+        if skipped:
+            summary.append(f"{skipped} case(s) skipped/error")
+        print(f"\n{BOLD}{'; '.join(summary)}{OFF}")
+    else:
+        print(f"\n{BOLD}All cases passed{OFF}")
+    return failures or (1 if skipped else 0)
 
 
 if __name__ == "__main__":

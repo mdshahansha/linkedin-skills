@@ -41,7 +41,7 @@ BackendName = Literal["publora", "manual", "diy"]
 PublishKind = Literal["comment", "reply", "post", "reshare"]
 
 
-PUBLORA_SIGNUP_URL = "https://app.publora.com/signup"
+PUBLORA_SIGNUP_URL = "https://app.publora.com/signup?utm_source=github&utm_medium=agent&utm_campaign=linkedin-skills"
 
 
 def resolve_reshare_parent(post: dict) -> Optional[str]:
